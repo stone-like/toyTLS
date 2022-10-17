@@ -2,12 +2,16 @@ package x509
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ASN.1 Distinguished Encoding Rules (DER)
@@ -73,9 +77,15 @@ var (
 	ErrInvalidSigAlgoChild          = errors.New("Bad AlgorithmIdentifier. it must contain at most two children")
 	ErrInvalidSigAlgoObjIdent       = errors.New("Bad AlgorithmIdentifier. it must start with ObjectIdentifier")
 	ErrInvalidTBSCert               = errors.New("This is not a TBSCertificate,Wrong Data Type")
-	ErrInvalidTBSCertChild          = errors.New("Bad TBSCertificate. it must contain at least 7 children")
+	ErrInvalidTBSCertChild          = errors.New("Bad TBSCertificate. it must contain at least 6 children")
 	ErrInvalidSubjectPublicKey      = errors.New("Bad SubjectPublicKeyInfo. it must be sequence")
 	ErrInvalidSubjectPublicKeyChild = errors.New("Bad SubjectPublicKeyInfo. it must contain two child")
+	ErrInvalidKeyValueChild         = errors.New("Bad KeyValue. it must contain two child.modulus and exponent")
+	ErrInvalidVersion               = errors.New("Bad Version. it must 1byte")
+	ErrInvalidSigAlgo               = errors.New("Bad AlgorithmIdentifier. Unsupported Algorithm")
+	ErrInvalidNameChild             = errors.New("Bad Name. it must contain six children")
+	ErrInvalidNameOID               = errors.New("Bad Name. it must be valid oid")
+	ErrInvalidValidityChild         = errors.New("Bad Validity. it must contain two children")
 )
 
 func parseAST2DER() {}
@@ -257,6 +267,39 @@ type BitString struct {
 	Bytes      []byte
 }
 
+// type SubjectPublicKeyInfo struct {
+// 	ASN1             *Data
+// 	Algorithm        *AlgorithmIdentifier
+// 	SubjectPublicKey *BitString
+// }
+
+type SubjectPublicKeyInfo struct {
+	ASN1             *Data
+	Algorithm        *AlgorithmIdentifier
+	SubjectPublicKey *SubjectPublicKey
+}
+
+type SubjectPublicKey struct {
+	Modulus  string
+	Exponent string //displayではint
+}
+
+func (s *SubjectPublicKeyInfo) displayAlgorithm() {
+	// fmt.Printf("    Public Key Algorithm: %s\n", s.Algorithm)
+}
+
+func (s *SubjectPublicKeyInfo) displayModulus() {
+
+}
+
+func (s *SubjectPublicKeyInfo) Display() {
+	fmt.Println("Subject Public Key Info:")
+	s.displayAlgorithm()
+	fmt.Println("        Modulus")
+	s.displayModulus()
+
+}
+
 func (p *CertParser) Parse() (*Certificate, error) {
 	asn1, err := p.DERParser.Parse()
 	if err != nil {
@@ -321,29 +364,47 @@ func (p *CertParser) parseDERList(contents []byte) ([]*Data, error) {
 
 type TBSCertificate struct {
 	ASN1                 *Data
-	Vertion              *Data
-	SerialNumber         *Data
+	Version              int
+	SerialNumber         string
 	Signature            *AlgorithmIdentifier
-	Issuer               *Data
-	Validity             *Data
-	Subject              *Data
+	Issuer               *Name
+	Validity             *VerifyPeriod
+	Subject              *Name
 	SubjectPublicKeyInfo *SubjectPublicKeyInfo
-	IssuerUniqueID       *IssuerUniqueID  //Optional
-	SubjectUniqueID      *SubjectUniqueID //Optional
-	Extensions           *Extensions      //Optional
+	IssuerUniqueID       *int        //Optional
+	SubjectUniqueID      *int        //Optional
+	Extensions           *Extensions //Optional
+}
 
+type Name struct {
+	Country          string
+	StateOrProvince  string
+	Locality         string
+	Organization     string
+	OrganizationUnit string
+	Common           string
+}
+
+type VerifyPeriod struct {
+	NotBefore time.Time
+	NotAfter  time.Time
+}
+
+var layout = "Jan 02 15:04:05 2006 GMT"
+
+func (v *VerifyPeriod) Display() {
+
+	fmt.Println("Validity")
+	fmt.Printf("    Not Before: %s\n", v.NotBefore.Format(layout))
+	fmt.Printf("    Not After : %s\n", v.NotAfter.Format(layout))
 }
 
 type IssuerUniqueID int
 type SubjectUniqueID int
 type Extensions struct {
 }
-type SubjectPublicKeyInfo struct {
-	ASN1             *Data
-	Algorithm        *AlgorithmIdentifier
-	SubjectPublicKey *BitString
-}
 
+//TODO curPieceNumではなくてDERParserでASN1をデータごとに繋げていく
 func (p *CertParser) parseTBSCertificate(asn1 *Data) (*TBSCertificate, error) {
 	if asn1.Class != 0 || asn1.Tag != 16 || !asn1.Structured {
 		return nil, ErrInvalidCertificate
@@ -355,20 +416,41 @@ func (p *CertParser) parseTBSCertificate(asn1 *Data) (*TBSCertificate, error) {
 		return nil, err
 	}
 
-	if len(pieces) < 7 {
+	//versionを除いて最低6個は子供がいないといけない(versionはないときもある)
+	if len(pieces) < 6 {
 		return nil, ErrInvalidTBSCertChild
 	}
 
-	tbs.Vertion = pieces[0]
-	tbs.SerialNumber = pieces[1]
-	tbs.Signature, err = p.parseAlgorithmIdentifier(pieces[2])
+	curPieceNum := 0
+	versionExists := false
+
+	tbs.Version, versionExists, err = p.parseVersion(pieces[curPieceNum])
 	if err != nil {
 		return nil, err
 	}
-	tbs.Issuer = pieces[3]
-	tbs.Validity = pieces[4]
-	tbs.Subject = pieces[5]
-	tbs.SubjectPublicKeyInfo, err = p.parseSubjectPublicKeyInfo(pieces[6])
+
+	if versionExists {
+		curPieceNum = 1
+	}
+
+	tbs.SerialNumber = p.parseToHex(pieces[curPieceNum])
+	tbs.Signature, err = p.parseAlgorithmIdentifier(pieces[curPieceNum+1])
+	if err != nil {
+		return nil, err
+	}
+	tbs.Issuer, err = p.parseName(pieces[curPieceNum+2])
+	if err != nil {
+		return nil, err
+	}
+	tbs.Validity, err = p.parseValidity(pieces[curPieceNum+3])
+	if err != nil {
+		return nil, err
+	}
+	tbs.Subject, err = p.parseName(pieces[curPieceNum+4])
+	if err != nil {
+		return nil, err
+	}
+	tbs.SubjectPublicKeyInfo, err = p.parseSubjectPublicKeyInfo(pieces[curPieceNum+5])
 	if err != nil {
 		return nil, err
 	}
@@ -377,6 +459,217 @@ func (p *CertParser) parseTBSCertificate(asn1 *Data) (*TBSCertificate, error) {
 	return tbs, nil
 
 }
+
+func (p *CertParser) parseVersion(asn1 *Data) (int, bool, error) {
+	if asn1.Tag != 0 || asn1.Class != ASN1_CONTEXT_SPECIFIC {
+		return 1, false, nil
+
+	}
+
+	p.DERParser.ResetWithNewData(asn1.Contents)
+
+	version, err := p.DERParser.Parse()
+	if err != nil {
+		return 1, false, err
+	}
+	p.DERParser.Reset()
+
+	//expect version.Content is only 1byte
+	if len(version.Contents) != 1 {
+		return 1, false, ErrInvalidVersion
+	}
+
+	versionNum, err := Bytes2Int(version.Contents)
+	if err != nil {
+		return 1, false, err
+	}
+
+	return versionNum + 1, true, nil
+}
+
+func (p *CertParser) parseToHex(asn1 *Data) string {
+	return hex.EncodeToString(asn1.Contents)
+}
+
+//Nameは6つchildがあり、それぞれのchildは
+//AttributeTypeAndValue
+// AttributeTypeAndValue
+//  oid
+//  content
+//となっているのでchildをgetしたあと、もう一度DERParseがいる
+var (
+	OID_CommonName             []byte = []byte{0x55, 0x04, 0x03}
+	OID_CountryName            []byte = []byte{0x55, 0x04, 0x06}
+	OID_LocalityName           []byte = []byte{0x55, 0x04, 0x07}
+	OID_StateOrProvinceName    []byte = []byte{0x55, 0x04, 0x08}
+	OID_OrganizationName       []byte = []byte{0x55, 0x04, 0x0A}
+	OID_OrganizationalUnitName []byte = []byte{0x55, 0x04, 0x0B}
+
+	OIDNames [][]byte = [][]byte{OID_CommonName, OID_CountryName, OID_LocalityName, OID_StateOrProvinceName, OID_OrganizationName, OID_OrganizationalUnitName}
+)
+
+func (p *CertParser) getNameChildContent(childRoot *Data) (string, error) {
+
+	p.DERParser.ResetWithNewData(childRoot.Contents)
+	attr, err := p.DERParser.Parse()
+	if err != nil {
+		return "", err
+	}
+
+	checkOID := func(oid []byte) bool {
+		for _, name := range OIDNames {
+			if bytes.Equal(oid, name) {
+				return true
+			}
+		}
+		return false
+	}
+
+	oidRawdata := attr.Contents[:5]
+	p.DERParser.ResetWithNewData(oidRawdata)
+	oid, err := p.DERParser.Parse()
+	if err != nil {
+		return "", err
+	}
+	if !checkOID(oid.Contents) {
+		return "", ErrInvalidNameOID
+	}
+	contentRawData := attr.Contents[5:]
+	p.DERParser.ResetWithNewData(contentRawData)
+	content, err := p.DERParser.Parse()
+	if err != nil {
+		return "", err
+	}
+
+	p.DERParser.Reset()
+
+	return string(content.Contents), nil
+}
+func (p *CertParser) parseName(asn1 *Data) (*Name, error) {
+
+	piece, err := p.parseDERList(asn1.Contents)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(piece) != 6 {
+		return nil, ErrInvalidNameChild
+	}
+
+	country, err := p.getNameChildContent(piece[0])
+	if err != nil {
+		return nil, err
+	}
+
+	stateOrProvince, err := p.getNameChildContent(piece[1])
+	if err != nil {
+		return nil, err
+	}
+	locality, err := p.getNameChildContent(piece[2])
+	if err != nil {
+		return nil, err
+	}
+
+	organization, err := p.getNameChildContent(piece[3])
+	if err != nil {
+		return nil, err
+	}
+
+	organizationUnit, err := p.getNameChildContent(piece[4])
+	if err != nil {
+		return nil, err
+	}
+	common, err := p.getNameChildContent(piece[5])
+	if err != nil {
+		return nil, err
+	}
+
+	p.DERParser.Reset()
+
+	return &Name{
+		Country:          country,
+		StateOrProvince:  stateOrProvince,
+		Locality:         locality,
+		Organization:     organization,
+		OrganizationUnit: organizationUnit,
+		Common:           common,
+	}, nil
+}
+
+func (p *CertParser) parseValidity(asn1 *Data) (*VerifyPeriod, error) {
+	pieces, err := p.parseDERList(asn1.Contents)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(pieces) != 2 {
+		return nil, ErrInvalidValidityChild
+	}
+
+	toTime := func(b []byte) (time.Time, error) {
+		data := string(b)
+		year, err := strconv.Atoi(data[:2])
+		if err != nil {
+			return time.Time{}, err
+		}
+		year += 2000
+
+		month, err := strconv.Atoi(data[2:4])
+		if err != nil {
+			return time.Time{}, err
+		}
+		day, err := strconv.Atoi(data[4:6])
+		if err != nil {
+			return time.Time{}, err
+		}
+		hour, err := strconv.Atoi(data[6:8])
+		if err != nil {
+			return time.Time{}, err
+		}
+		minute, err := strconv.Atoi(data[8:10])
+		if err != nil {
+			return time.Time{}, err
+		}
+		sec, err := strconv.Atoi(data[10:12])
+		if err != nil {
+			return time.Time{}, err
+		}
+		gmt, err := time.LoadLocation("GMT")
+		if err != nil {
+			return time.Time{}, err
+		}
+
+		return time.Date(
+			year,
+			time.Month(month),
+			day,
+			hour,
+			minute,
+			sec,
+			0,
+			gmt,
+		), nil
+	}
+	notBefore, err := toTime(pieces[0].Contents)
+	if err != nil {
+		return nil, err
+	}
+	notAfter, err := toTime(pieces[1].Contents)
+	if err != nil {
+		return nil, err
+	}
+
+	return &VerifyPeriod{
+		NotBefore: notBefore,
+		NotAfter:  notAfter,
+	}, nil
+}
+
+var (
+	OID_RSA = "1.2.840.113549.1.1.1"
+
+	ValidAlgos = []string{OID_RSA}
+)
 
 func (p *CertParser) parseSubjectPublicKeyInfo(asn1 *Data) (*SubjectPublicKeyInfo, error) {
 	if asn1.Class != 0 || asn1.Tag != 16 || !asn1.Structured {
@@ -393,11 +686,48 @@ func (p *CertParser) parseSubjectPublicKeyInfo(asn1 *Data) (*SubjectPublicKeyInf
 		return nil, ErrInvalidSubjectPublicKeyChild
 	}
 
-	pubKey.Algorithm, err = p.parseAlgorithmIdentifier(pieces[0])
+	checkAlgo := func(str string) bool {
+		for _, algo := range ValidAlgos {
+			if str == algo {
+				return true
+			}
+		}
+		return false
+	}
+
+	algorithm, err := p.parseAlgorithmIdentifier(pieces[0])
 	if err != nil {
 		return nil, err
 	}
-	pubKey.SubjectPublicKey = p.parseBitString(pieces[1].Contents)
+
+	if !checkAlgo(algorithm.Algorithm) {
+		return nil, ErrInvalidSigAlgo
+	}
+
+	subjectPublicKey := p.parseBitString(pieces[1].Contents)
+
+	//subjectPublicKeyの中身のmodulesとexponentを取り出す
+	p.DERParser.ResetWithNewData(subjectPublicKey.Bytes)
+	keyValueData, err := p.DERParser.Parse()
+	if err != nil {
+		return nil, err
+	}
+	pieces, err = p.parseDERList(keyValueData.Contents)
+	if err != nil {
+		return nil, err
+	}
+	if len(pieces) != 2 {
+		return nil, ErrInvalidKeyValueChild
+	}
+
+	modulus := p.parseToHex(pieces[0])
+	exponent := p.parseToHex(pieces[1])
+
+	pubKey.Algorithm = algorithm
+	pubKey.SubjectPublicKey = &SubjectPublicKey{
+		Modulus:  modulus,
+		Exponent: exponent,
+	}
 
 	return pubKey, nil
 }
@@ -452,6 +782,7 @@ func (p *CertParser) parseAlgorithmIdentifier(asn1 *Data) (*AlgorithmIdentifier,
 
 //下記はOIDのdecodeだからencodeの逆を行う
 
+//正直decodeせずに目標とするOIDはわかっているから、それをbytes.Equalする方が早い気もする
 func decodeOID(data []byte) string {
 	var builder strings.Builder
 	//最初の二つを取り出す
@@ -479,6 +810,12 @@ func decodeOID(data []byte) string {
 
 	return builder.String()
 }
+
+// var (
+// 	oidForMD5WithRSA []byte = []byte{0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x04}
+// 	oidForSHAWithRSA []byte = []byte{0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05}
+// )
+
 func (p *CertParser) parseObjectIdent(data []byte) string {
 	return decodeOID(data)
 }
@@ -531,4 +868,8 @@ func GetContent(name string) (string, error) {
 	}
 
 	return builder.String(), nil
+}
+
+func (c *Certificate) ShowDetail() {
+	//show detail...
 }

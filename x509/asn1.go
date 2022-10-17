@@ -1,0 +1,53 @@
+package x509
+
+const (
+	ASN1_CLASS_UNIVERSAL int = iota
+	ASN1_CLASS_APPLICATION
+	ASN1_CONTEXT_SPECIFIC
+	ASN1_PRIVATE
+)
+
+const (
+	ASN1_BER                  = 0
+	ASN1_BOOLEAN              = 1
+	ASN1_INTEGER              = 2
+	ASN1_BIT_STRING           = 3
+	ASN1_OCTET_STRING         = 4
+	ASN1_NULL                 = 5
+	ASN1_OBJECT_IDENTIFIER    = 6
+	ASN1_OBJECT_DESCRIPTOR    = 7
+	ASN1_INSTANCE_OF_EXTERNAL = 8
+	ASN1_REAL                 = 9
+	ASN1_ENUMERATED           = 10
+	ASN1_EMBEDDED_PPV         = 11
+	ASN1_UTF8_STRING          = 12
+	ASN1_RELATIVE_OID         = 13
+
+	ASN1_SEQUENCE         = 16
+	ASN1_SET              = 17
+	ASN1_NUMERIC_STRING   = 18
+	ASN1_PRINTABLE_STRING = 19
+	ASN1_TELETEX_STRING   = 20
+	ASN1_T61_STRING       = 20
+	ASN1_VIDEOTEX_STRING  = 21
+	ASN1_IA5_STRING       = 22
+	ASN1_UTC_TIME         = 23
+	ASN1_GENERALIZED_TIME = 24
+	ASN1_GRAPHIC_STRING   = 25
+	ASN1_VISIBLE_STRING   = 26
+	ASN1_ISO64_STRING     = 26
+	ASN1_GENERAL_STRING   = 27
+	ASN1_UNIVERSAL_STRING = 28
+	ASN1_CHARACTER_STRING = 29
+	ASN1_BMP_STRING       = 30
+)
+
+const (
+	RSA int = iota
+	DH
+)
+
+const (
+	md5WithRSAEncryption int = iota
+	shaWithRSAEncryption
+)
