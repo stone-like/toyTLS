@@ -70,22 +70,28 @@ import (
 // }
 
 var (
-	ErrInvalidCertificate           = errors.New("This is not an X509. Wrong Data Type")
-	ErrInvalidChildrenLength        = errors.New("Certificate must contain three children")
-	ErrInvalidSigValue              = errors.New("Bad SignatureValue. it must be bitString")
-	ErrInvalidSigAlgoSeq            = errors.New("Bad AlgorithmIdentifier. it must be sequence")
-	ErrInvalidSigAlgoChild          = errors.New("Bad AlgorithmIdentifier. it must contain at most two children")
-	ErrInvalidSigAlgoObjIdent       = errors.New("Bad AlgorithmIdentifier. it must start with ObjectIdentifier")
-	ErrInvalidTBSCert               = errors.New("This is not a TBSCertificate,Wrong Data Type")
-	ErrInvalidTBSCertChild          = errors.New("Bad TBSCertificate. it must contain at least 6 children")
-	ErrInvalidSubjectPublicKey      = errors.New("Bad SubjectPublicKeyInfo. it must be sequence")
-	ErrInvalidSubjectPublicKeyChild = errors.New("Bad SubjectPublicKeyInfo. it must contain two child")
-	ErrInvalidKeyValueChild         = errors.New("Bad KeyValue. it must contain two child.modulus and exponent")
-	ErrInvalidVersion               = errors.New("Bad Version. it must 1byte")
-	ErrInvalidSigAlgo               = errors.New("Bad AlgorithmIdentifier. Unsupported Algorithm")
-	ErrInvalidNameChild             = errors.New("Bad Name. it must contain six children")
-	ErrInvalidNameOID               = errors.New("Bad Name. it must be valid oid")
-	ErrInvalidValidityChild         = errors.New("Bad Validity. it must contain two children")
+	ErrInvalidCertificate             = errors.New("This is not an X509. Wrong Data Type")
+	ErrInvalidChildrenLength          = errors.New("Certificate must contain three children")
+	ErrInvalidSigValue                = errors.New("Bad SignatureValue. it must be bitString")
+	ErrInvalidSigAlgoSeq              = errors.New("Bad AlgorithmIdentifier. it must be sequence")
+	ErrInvalidSigAlgoChild            = errors.New("Bad AlgorithmIdentifier. it must contain at most two children")
+	ErrInvalidSigAlgoObjIdent         = errors.New("Bad AlgorithmIdentifier. it must start with ObjectIdentifier")
+	ErrInvalidTBSCert                 = errors.New("This is not a TBSCertificate,Wrong Data Type")
+	ErrInvalidTBSCertChild            = errors.New("Bad TBSCertificate. it must contain at least 6 children")
+	ErrInvalidSubjectPublicKey        = errors.New("Bad SubjectPublicKeyInfo. it must be sequence")
+	ErrInvalidSubjectPublicKeyChild   = errors.New("Bad SubjectPublicKeyInfo. it must contain two child")
+	ErrInvalidKeyValueChild           = errors.New("Bad KeyValue. it must contain two child.modulus and exponent")
+	ErrInvalidVersion                 = errors.New("Bad Version. it must 1byte")
+	ErrInvalidSigAlgo                 = errors.New("Bad AlgorithmIdentifier. Unsupported Algorithm")
+	ErrInvalidNameChild               = errors.New("Bad Name. it must contain six children")
+	ErrInvalidNameOID                 = errors.New("Bad Name. it must be valid oid")
+	ErrInvalidValidityChild           = errors.New("Bad Validity. it must contain two children")
+	ErrInvalidExtensionChild          = errors.New("Bad Extension. it must contain two children")
+	ErrInvalidExtension               = errors.New("Bad Extension. Unsupported Extension")
+	ErrExtensionCanNotBeCritical      = errors.New("Bad Extension. this extension can not be critical")
+	ErrContextSpecific                = errors.New("Bad Class. this class must be Context Specific")
+	ErrInvalidOptionalNum             = errors.New("Bad Optional. this optionalNum must be within target struct")
+	ErrInvalidBasicConstraintsBoolean = errors.New("Bad BasicConstraints. this requires critical")
 )
 
 func parseAST2DER() {}
@@ -373,7 +379,7 @@ type TBSCertificate struct {
 	SubjectPublicKeyInfo *SubjectPublicKeyInfo
 	IssuerUniqueID       *int        //Optional
 	SubjectUniqueID      *int        //Optional
-	Extensions           *Extensions //Optional
+	Extensions           []Extension //Optional
 }
 
 type Name struct {
@@ -401,8 +407,6 @@ func (v *VerifyPeriod) Display() {
 
 type IssuerUniqueID int
 type SubjectUniqueID int
-type Extensions struct {
-}
 
 //TODO curPieceNumではなくてDERParserでASN1をデータごとに繋げていく
 func (p *CertParser) parseTBSCertificate(asn1 *Data) (*TBSCertificate, error) {
@@ -455,8 +459,230 @@ func (p *CertParser) parseTBSCertificate(asn1 *Data) (*TBSCertificate, error) {
 		return nil, err
 	}
 
-	//ignoreOptionFieldForNow
+	err = p.parseOptional(pieces[curPieceNum+6:], tbs)
+	if err != nil {
+		return nil, err
+	}
+
 	return tbs, nil
+
+}
+
+// TBSCertificate  ::=  SEQUENCE  {
+// 	version         [0]  Version DEFAULT v1,
+// 	serialNumber         CertificateSerialNumber,
+// 	signature            AlgorithmIdentifier,
+// 	issuer               Name,
+// 	validity             Validity,
+// 	subject              Name,
+// 	subjectPublicKeyInfo SubjectPublicKeyInfo,
+// 	issuerUniqueID  [1]  IMPLICIT UniqueIdentifier OPTIONAL,
+// 						 -- If present, version MUST be v2 or v3
+// 	subjectUniqueID [2]  IMPLICIT UniqueIdentifier OPTIONAL,
+// 						 -- If present, version MUST be v2 or v3
+// 	extensions      [3]  Extensions OPTIONAL
+// 						 -- If present, version MUST be v3 --  }
+//となっているので、1だったらissuer,2だったらsubject,3だったらextensions
+func (p *CertParser) parseOptional(data []*Data, tbs *TBSCertificate) error {
+	//ここもdataを回してoptionのTagごとに分岐
+
+	//ここからoptionalなのでpiecesが存在するかチェック
+	if len(data) == 0 {
+		return nil
+	}
+
+	//TODO parseIssuerUniqueID and parseSubjectUniqueID	をつける
+	extensions, err := p.parseExtensions(data[0])
+	if err != nil {
+		return err
+	}
+	fmt.Println(extensions)
+	return nil
+}
+
+//Extensions
+// Extension(byte数)
+//  Extension(このExtensionのbyte数)
+//   Extension名
+//   Content
+func (p *CertParser) parseExtensions(asn1 *Data) ([]Extension, error) {
+	p.DERParser.ResetWithNewData(asn1.Contents)
+	extensionsData, err := p.DERParser.Parse()
+	if err != nil {
+		return nil, err
+	}
+	pieces, err := p.parseDERList(extensionsData.Contents)
+	if err != nil {
+		return nil, err
+	}
+	extensionLen := len(pieces)
+
+	extensions := make([]Extension, extensionLen)
+
+	for i := 0; i < extensionLen; i++ {
+		extension, err := p.parseExtension(pieces[i])
+		if err != nil {
+			return nil, err
+		}
+		extensions[i] = extension
+	}
+
+	return extensions, nil
+}
+
+//  Extension(このExtensionのbyte数)
+//   Extension名
+//   Critical(Option)
+//   Content
+//上記部分のParse
+func (p *CertParser) parseExtension(asn1 *Data) (Extension, error) {
+	pieces, err := p.parseDERList(asn1.Contents)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(pieces) != 2 && len(pieces) != 3 {
+		return nil, ErrInvalidExtensionChild
+	}
+
+	oid := p.parseObjectIdent(pieces[0].Contents)
+
+	switch oid {
+	case oid_subjectKeyIdentifier:
+		return p.parseSubjectKeyIdentifier(pieces[1:], oid)
+	case oid_authorityKeyIdentifier:
+		return p.parseAuthorityKeyIdentifier(pieces[1:], oid)
+	case oid_basicConstraints:
+		return p.parseBasicConstraints(pieces[1:], oid)
+	default:
+		return nil, ErrInvalidExtension
+	}
+
+}
+
+//doesn't have critical
+// SubjectKeyIdentifier ::= KeyIdentifier
+func (p *CertParser) parseSubjectKeyIdentifier(data []*Data, oid string) (*SubjectKeyIdentifier, error) {
+	if len(data) == 2 {
+		return nil, ErrExtensionCanNotBeCritical
+	}
+
+	p.DERParser.ResetWithNewData(data[0].Contents)
+	keyIdent, err := p.DERParser.Parse()
+	if err != nil {
+		return nil, err
+	}
+
+	return &SubjectKeyIdentifier{
+		KeyIdentidier: p.parseToHex(keyIdent),
+	}, nil
+}
+
+//doesn't have critical
+// AuthorityKeyIdentifier ::= SEQUENCE {
+//     keyIdentifier             [0] KeyIdentifier           OPTIONAL,
+//     authorityCertIssuer       [1] GeneralNames            OPTIONAL,
+//     authorityCertSerialNumber [2] CertificateSerialNumber OPTIONAL }
+
+//optionalの場合、クラスにはコンテキスト特定クラスが使用され、tagは普通の奴ではなく構造体の上からの番号になる
+//例えばkeyIdentifierだったらclass=2(コンテキスト特定クラス),tag=0となる
+//authorityCertIssuerだったらtag=1
+func (p *CertParser) parseAuthorityKeyIdentifier(data []*Data, oid string) (*AuthorityKeyIdentifier, error) {
+	if len(data) == 2 {
+		return nil, ErrExtensionCanNotBeCritical
+	}
+
+	p.DERParser.ResetWithNewData(data[0].Contents)
+	seq, err := p.DERParser.Parse()
+	if err != nil {
+		return nil, err
+	}
+
+	pieces, err := p.parseDERList(seq.Contents)
+	if err != nil {
+		return nil, err
+	}
+
+	ident := &AuthorityKeyIdentifier{
+		OID: oid,
+	}
+
+	for _, piece := range pieces {
+
+		if piece.Class != ASN1_CONTEXT_SPECIFIC {
+			return nil, ErrContextSpecific
+		}
+
+		switch piece.Tag {
+		case 0:
+			hex := p.parseToHex(piece)
+			ident.KeyIdentifier = &hex
+		case 1:
+			name, err := p.parseName(piece)
+			if err != nil {
+				return nil, err
+			}
+			ident.AuthorityCertIssuer = name
+		case 2:
+			hex := p.parseToHex(piece)
+			ident.AuthorityKeyIdentifier = &hex
+		default:
+			return nil, ErrInvalidOptionalNum
+		}
+	}
+
+	return ident, nil
+}
+
+//may have critical
+//BasicConstraints ::= SEQUENCE {
+//    cA                   BOOLEAN DEFAULT FALSE,
+//   pathLenConstraint    INTEGER (0..MAX) OPTIONAL
+//}
+func (p *CertParser) parseBasicConstraints(data []*Data, oid string) (*BasicConstraints, error) {
+	basicConstraints := &BasicConstraints{}
+
+	if len(data) == 0 {
+		return basicConstraints, nil
+	}
+
+	for _, d := range data {
+		switch d.Tag {
+		case 0:
+			i, err := Bytes2Int(d.Contents)
+			if err != nil {
+				return nil, err
+			}
+			basicConstraints.PathLenConstraint = &i
+		case ASN1_BOOLEAN:
+			isCritical, err := p.parseBoolean(d)
+			if err != nil {
+				return nil, err
+			}
+			basicConstraints.Critical = isCritical
+		default:
+			return nil, ErrInvalidOptionalNum
+		}
+	}
+
+	return nil, nil
+}
+
+func (p *CertParser) parseBoolean(asn1 *Data) (bool, error) {
+	if asn1.Tag != ASN1_BOOLEAN {
+		return false, ErrInvalidBasicConstraintsBoolean
+	}
+
+	i, err := Bytes2Int(asn1.Contents)
+	if err != nil {
+		return false, err
+	}
+
+	if i == 1 {
+		return true, nil
+	}
+
+	return false, nil
 
 }
 
