@@ -3,11 +3,14 @@ package x509
 import (
 	"bufio"
 	"bytes"
+	"crypto"
+	"crypto/rsa"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"os"
 	"strconv"
 	"strings"
@@ -93,8 +96,6 @@ var (
 	ErrInvalidOptionalNum             = errors.New("Bad Optional. this optionalNum must be within target struct")
 	ErrInvalidBasicConstraintsBoolean = errors.New("Bad BasicConstraints. this requires critical")
 )
-
-func parseAST2DER() {}
 
 type DERParser struct {
 	Position int
@@ -243,29 +244,24 @@ func NewCertParser(data []byte) *CertParser {
 	}
 }
 
-type Certificate struct {
-	TbsCertificate     *TBSCertificate
-	SignatureAlgorithm *AlgorithmIdentifier
-	SignatureValue     *SignatureValue
-}
-
-// func (c *Certificate) ExtractPublicKey() []byte {
-
-// }
-
 type AlgorithmIdentifier struct {
-	ASN1       *Data
 	Algorithm  string
 	Parameters *Parameters //Optional
 }
 
 type Parameters struct {
-	ASN1 *Data
 }
 
+// type SignatureValue struct {
+// 	ASN1 *Data
+// 	Bits *BitString
+// }
 type SignatureValue struct {
-	ASN1 *Data
-	Bits *BitString
+	Value []byte
+}
+
+func (s *SignatureValue) ToHex() string {
+	return parseHex(s.Value)
 }
 
 type BitString struct {
@@ -280,7 +276,6 @@ type BitString struct {
 // }
 
 type SubjectPublicKeyInfo struct {
-	ASN1             *Data
 	Algorithm        *AlgorithmIdentifier
 	SubjectPublicKey *SubjectPublicKey
 }
@@ -288,6 +283,20 @@ type SubjectPublicKeyInfo struct {
 type SubjectPublicKey struct {
 	Modulus  string
 	Exponent string //displayではint
+}
+
+func (s *SubjectPublicKey) toPubKey() (crypto.PublicKey, error) {
+
+	i := new(big.Int)
+	i.SetString(s.Modulus, 16)
+	e, err := strconv.ParseInt(s.Exponent, 16, 64)
+	if err != nil {
+		return nil, err
+	}
+	return &rsa.PublicKey{
+		N: i,
+		E: int(e),
+	}, nil
 }
 
 func (s *SubjectPublicKeyInfo) displayAlgorithm() {
@@ -414,7 +423,9 @@ func (p *CertParser) parseTBSCertificate(asn1 *Data) (*TBSCertificate, error) {
 		return nil, ErrInvalidCertificate
 	}
 
-	tbs := &TBSCertificate{ASN1: asn1}
+	tbs := &TBSCertificate{
+		ASN1: asn1,
+	}
 	pieces, err := p.parseDERList(asn1.Contents)
 	if err != nil {
 		return nil, err
@@ -485,18 +496,27 @@ func (p *CertParser) parseTBSCertificate(asn1 *Data) (*TBSCertificate, error) {
 //となっているので、1だったらissuer,2だったらsubject,3だったらextensions
 func (p *CertParser) parseOptional(data []*Data, tbs *TBSCertificate) error {
 	//ここもdataを回してoptionのTagごとに分岐
+	for _, d := range data {
+		if d.Class != ASN1_CONTEXT_SPECIFIC {
+			return ErrContextSpecific
+		}
+		switch d.Tag {
+		case 1:
+			continue
+		case 2:
+			continue
+		case 3:
+			extensions, err := p.parseExtensions(data[0])
+			if err != nil {
+				return err
+			}
+			tbs.Extensions = extensions
+		default:
+			return ErrInvalidOptionalNum
+		}
 
-	//ここからoptionalなのでpiecesが存在するかチェック
-	if len(data) == 0 {
-		return nil
 	}
 
-	//TODO parseIssuerUniqueID and parseSubjectUniqueID	をつける
-	extensions, err := p.parseExtensions(data[0])
-	if err != nil {
-		return err
-	}
-	fmt.Println(extensions)
 	return nil
 }
 
@@ -574,6 +594,7 @@ func (p *CertParser) parseSubjectKeyIdentifier(data []*Data, oid string) (*Subje
 	}
 
 	return &SubjectKeyIdentifier{
+		OID:           oid,
 		KeyIdentidier: p.parseToHex(keyIdent),
 	}, nil
 }
@@ -640,32 +661,51 @@ func (p *CertParser) parseAuthorityKeyIdentifier(data []*Data, oid string) (*Aut
 //   pathLenConstraint    INTEGER (0..MAX) OPTIONAL
 //}
 func (p *CertParser) parseBasicConstraints(data []*Data, oid string) (*BasicConstraints, error) {
-	basicConstraints := &BasicConstraints{}
 
-	if len(data) == 0 {
-		return basicConstraints, nil
+	critical := false
+	component := data[0]
+	if len(data) == 2 {
+		var err error
+		critical, err = p.parseBoolean(component)
+		if err != nil {
+			return nil, err
+		}
+		component = data[1]
 	}
 
-	for _, d := range data {
+	basicConstraints := &BasicConstraints{OID: oid, Critical: critical}
+
+	p.DERParser.ResetWithNewData(component.Contents)
+	seq, err := p.DERParser.Parse()
+	if err != nil {
+		return nil, err
+	}
+
+	pieces, err := p.parseDERList(seq.Contents)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, d := range pieces {
 		switch d.Tag {
-		case 0:
+		case ASN1_INTEGER:
 			i, err := Bytes2Int(d.Contents)
 			if err != nil {
 				return nil, err
 			}
 			basicConstraints.PathLenConstraint = &i
 		case ASN1_BOOLEAN:
-			isCritical, err := p.parseBoolean(d)
+			isCA, err := p.parseBoolean(d)
 			if err != nil {
 				return nil, err
 			}
-			basicConstraints.Critical = isCritical
+			basicConstraints.CA = isCA
 		default:
 			return nil, ErrInvalidOptionalNum
 		}
 	}
 
-	return nil, nil
+	return basicConstraints, nil
 }
 
 func (p *CertParser) parseBoolean(asn1 *Data) (bool, error) {
@@ -678,11 +718,11 @@ func (p *CertParser) parseBoolean(asn1 *Data) (bool, error) {
 		return false, err
 	}
 
-	if i == 1 {
-		return true, nil
+	if i == 0 {
+		return false, nil
 	}
 
-	return false, nil
+	return true, nil
 
 }
 
@@ -713,8 +753,12 @@ func (p *CertParser) parseVersion(asn1 *Data) (int, bool, error) {
 	return versionNum + 1, true, nil
 }
 
+func parseHex(b []byte) string {
+	return hex.EncodeToString(b)
+}
+
 func (p *CertParser) parseToHex(asn1 *Data) string {
-	return hex.EncodeToString(asn1.Contents)
+	return parseHex(asn1.Contents)
 }
 
 //Nameは6つchildがあり、それぞれのchildは
@@ -902,7 +946,7 @@ func (p *CertParser) parseSubjectPublicKeyInfo(asn1 *Data) (*SubjectPublicKeyInf
 		return nil, ErrInvalidSubjectPublicKey
 	}
 
-	pubKey := &SubjectPublicKeyInfo{ASN1: asn1}
+	pubKey := &SubjectPublicKeyInfo{}
 	pieces, err := p.parseDERList(asn1.Contents)
 	if err != nil {
 		return nil, err
@@ -977,17 +1021,13 @@ func (p *CertParser) parseAlgorithmIdentifier(asn1 *Data) (*AlgorithmIdentifier,
 		return nil, ErrInvalidSigAlgoObjIdent
 	}
 
-	algIdent := &AlgorithmIdentifier{
-		ASN1: asn1,
-	}
+	algIdent := &AlgorithmIdentifier{}
 
 	algIdent.Algorithm = p.parseObjectIdent(encodeAlgo.Contents)
 
 	//parameters is optional
 	if len(pieces) == 2 {
-		algIdent.Parameters = &Parameters{
-			ASN1: pieces[1],
-		}
+		algIdent.Parameters = &Parameters{}
 	}
 
 	return algIdent, nil
@@ -1050,11 +1090,10 @@ func (p *CertParser) parseSignatureValue(asn1 *Data) (*SignatureValue, error) {
 		return nil, ErrInvalidSigValue
 	}
 
-	sig := &SignatureValue{
-		ASN1: asn1,
-	}
+	sig := &SignatureValue{}
 
-	sig.Bits = p.parseBitString(asn1.Contents)
+	bits := p.parseBitString(asn1.Contents)
+	sig.Value = bits.Bytes
 
 	return sig, nil
 }

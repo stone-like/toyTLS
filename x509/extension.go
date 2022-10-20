@@ -43,6 +43,7 @@ func (s *SubjectKeyIdentifier) GetOid() string {
 type BasicConstraints struct {
 	OID               string
 	Critical          bool
+	CA                bool
 	PathLenConstraint *int
 }
 
