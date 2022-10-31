@@ -726,6 +726,34 @@ func NewFinished(master, messages []byte, label string) *Finished {
 	}
 }
 
+func (t *TLSConnect) createEncryptMessageWithRecord(record *TLSRecord, writeKey, nonce, content []byte) ([]byte, error) {
+
+	seqNumBytes := Copy(nonce[4:])
+
+	addtionalData := MultiAppend(seqNumBytes, record.Type, record.Version, record.Len)
+
+	gcm, err := NewGCM(writeKey)
+	if err != nil {
+		return nil, err
+	}
+
+	encryptedMessage, err := gcm.EncryptMessage(writeKey, nonce, content, addtionalData)
+	if err != nil {
+		return nil, err
+	}
+
+	// return encryptedMessage, nil
+
+	record.Len = write2byte(uint16(len(nonce[4:]) + len(encryptedMessage)))
+
+	var buf bytes.Buffer
+	buf.Write(record.ToByte())
+	buf.Write(nonce[4:]) //seqNumのこと
+	buf.Write(encryptedMessage)
+
+	return buf.Bytes(), nil
+}
+
 //Finishedから暗号化が必要
 //AddtionalDataでのTLSHeaderではencryptしてないfinishedのlen16が入るけど
 //最終的なTLSHeaderのLenはContentであるencryptedFinishedの40がはいる
@@ -748,28 +776,7 @@ func createFinished(t *TLSConnect, writeKey, nonce, messages []byte, label strin
 		Len:     write2byte(uint16(len(message))),
 	}
 
-	seqNumBytes := Copy(nonce[4:])
-
-	addtionalData := MultiAppend(seqNumBytes, tlsRecord.Type, tlsRecord.Version, tlsRecord.Len)
-
-	gcm, err := NewGCM(writeKey)
-	if err != nil {
-		return nil, err
-	}
-
-	encryptedMessage, err := gcm.EncryptMessage(writeKey, nonce, message, addtionalData)
-	if err != nil {
-		return nil, err
-	}
-
-	tlsRecord.Len = write2byte(uint16(len(nonce[4:]) + len(encryptedMessage)))
-
-	var buf bytes.Buffer
-	buf.Write(tlsRecord.ToByte())
-	buf.Write(nonce[4:]) //seqNumのこと
-	buf.Write(encryptedMessage)
-
-	return buf.Bytes(), nil
+	return t.createEncryptMessageWithRecord(tlsRecord, writeKey, nonce, message)
 }
 
 func (t *TLSConnect) CreateFinished(writeKey, nonce []byte, label string) ([]byte, error) {
@@ -874,25 +881,7 @@ func (t *TLSConnect) createApplciationData(message []byte) ([]byte, error) {
 
 	nonce := append(iv, seqNumBytes...)
 
-	addtionalData := MultiAppend(seqNumBytes, tlsRecord.Type, tlsRecord.Version, tlsRecord.Len)
-
-	gcm, err := NewGCM(key)
-	if err != nil {
-		return nil, err
-	}
-
-	encryptedMessage, err := gcm.EncryptMessage(key, nonce, message, addtionalData)
-	if err != nil {
-		return nil, err
-	}
-	tlsRecord.Len = write2byte(uint16(len(nonce[4:]) + len(encryptedMessage)))
-
-	var buf bytes.Buffer
-	buf.Write(tlsRecord.ToByte())
-	buf.Write(nonce[4:]) //seqNumのこと
-	buf.Write(encryptedMessage)
-
-	return buf.Bytes(), nil
+	return t.createEncryptMessageWithRecord(tlsRecord, key, nonce, message)
 }
 
 func (t *TLSConnect) SendApplicationData(message []byte) error {
@@ -1046,8 +1035,7 @@ func (t *TLSConnect) parseServerHelloDone(content []byte) error {
 	return nil
 }
 
-func (t *TLSConnect) parseEncryptedFinished(record *TLSRecord, content []byte) error {
-
+func (t *TLSConnect) DecryptMessage(record *TLSRecord, content []byte) ([]byte, error) {
 	key, implicitNonce := t.KeyBlock.ServerWriteKey, t.KeyBlock.ServerWriteIV
 	if t.IsServer {
 		key, implicitNonce = t.KeyBlock.ClientWriteKey, t.KeyBlock.ClientWriteIV
@@ -1060,13 +1048,22 @@ func (t *TLSConnect) parseEncryptedFinished(record *TLSRecord, content []byte) e
 	//addtionalで使うTLSLenはplainFinishedのLenなのでOverHeadを使って求める
 	gcm, err := NewGCM(key)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	decryptTLSRecordLen := write2byte(uint16(len(cipherText) - gcm.c.Overhead()))
 	addtionalData := MultiAppend(Copy(explicitNonce), record.Type, record.Version, decryptTLSRecordLen)
 
 	decrypted, err := gcm.DecryptedMessage(key, nonce, cipherText, addtionalData)
+	if err != nil {
+		return nil, err
+	}
+
+	return decrypted, nil
+}
+
+func (t *TLSConnect) parseEncryptedFinished(record *TLSRecord, content []byte) error {
+	decrypted, err := t.DecryptMessage(record, content)
 	if err != nil {
 		return err
 	}
@@ -1138,25 +1135,7 @@ func parseApplicationDataContent(content []byte) error {
 }
 
 func (t *TLSConnect) parseApplicationData(record *TLSRecord, content []byte) error {
-	key, implicitNonce := t.KeyBlock.ServerWriteKey, t.KeyBlock.ServerWriteIV
-	if t.IsServer {
-		key, implicitNonce = t.KeyBlock.ClientWriteKey, t.KeyBlock.ClientWriteIV
-	}
-
-	explicitNonce := content[:explicitNonceLen]
-	cipherText := content[explicitNonceLen:]
-	nonce := append(Copy(implicitNonce), explicitNonce...)
-
-	//addtionalで使うTLSLenはplainFinishedのLenなのでOverHeadを使って求める
-	gcm, err := NewGCM(key)
-	if err != nil {
-		return err
-	}
-
-	decryptTLSRecordLen := write2byte(uint16(len(cipherText) - gcm.c.Overhead()))
-	addtionalData := MultiAppend(Copy(explicitNonce), record.Type, record.Version, decryptTLSRecordLen)
-
-	decrypted, err := gcm.DecryptedMessage(key, nonce, cipherText, addtionalData)
+	decrypted, err := t.DecryptMessage(record, content)
 	if err != nil {
 		return err
 	}
