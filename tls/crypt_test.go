@@ -18,7 +18,7 @@ func TestDecryptMessage(t *testing.T) {
 
 	nonce := append(Copy(iv), seqNum...)
 
-	gcm, err := GetGCM(writeKey)
+	gcm, err := NewGCM(writeKey)
 	require.NoError(t, err)
 
 	cipherText, err := gcm.EncryptMessage(writeKey, nonce, message, addtionalData)

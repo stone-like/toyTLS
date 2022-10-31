@@ -752,7 +752,7 @@ func createFinished(t *TLSConnect, writeKey, nonce, messages []byte, label strin
 
 	addtionalData := MultiAppend(seqNumBytes, tlsRecord.Type, tlsRecord.Version, tlsRecord.Len)
 
-	gcm, err := GetGCM(writeKey)
+	gcm, err := NewGCM(writeKey)
 	if err != nil {
 		return nil, err
 	}
@@ -787,33 +787,6 @@ func (t *TLSConnect) CreateServerFinished() ([]byte, error) {
 	nonce := append(copied, t.SeqNumBytes()...)
 	return t.CreateFinished(t.KeyBlock.ServerWriteKey, nonce, serverVerifyLabel)
 }
-
-// func (t *TLSConnect) SendFinished(writeKey, nonce []byte, label string) error {
-
-// 	bytes, err := CreateFinished(t, writeKey, nonce, messages, label)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	_, err = t.Conn.Write(bytes)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	return nil
-// }
-
-// func (t *TLSConnect) SendClientFinished() error {
-// 	copied := Copy(t.KeyBlock.ClientWriteIV)
-// 	nonce := append(copied, t.SeqNumBytes()...)
-// 	return t.SendFinished(t.KeyBlock.ClientWriteKey, nonce, clientVerifyLabel)
-// }
-
-// func (t *TLSConnect) SendServerFinished() error {
-// 	copied := Copy(t.KeyBlock.ServerWriteIV)
-// 	nonce := append(copied, t.SeqNumBytes()...)
-// 	return t.SendFinished(t.KeyBlock.ServerWriteKey, nonce, serverVerifyLabel)
-// }
 
 func (t *TLSConnect) SendClientFirst() error {
 	return t.SendHello(CLIENT_HELLO)
@@ -859,6 +832,8 @@ func (t *TLSConnect) SendClientSecond() error {
 		return err
 	}
 
+	t.AddSeqNum()
+
 	return nil
 }
 
@@ -878,7 +853,63 @@ func (t *TLSConnect) SendServerSecond() error {
 		return err
 	}
 
+	t.AddSeqNum()
+
 	return nil
+}
+
+func (t *TLSConnect) createApplciationData(message []byte) ([]byte, error) {
+	tlsRecord := &TLSRecord{
+		Type:    []byte{byte(APPLICATION_DATA)},
+		Version: []byte{0x03, 0x01},
+		Len:     write2byte(uint16(len(message))),
+	}
+
+	key, iv := t.KeyBlock.ClientWriteKey, Copy(t.KeyBlock.ClientWriteIV)
+	if t.IsServer {
+		key, iv = t.KeyBlock.ServerWriteKey, Copy(t.KeyBlock.ServerWriteIV)
+	}
+
+	seqNumBytes := Copy(t.SeqNumBytes())
+
+	nonce := append(iv, seqNumBytes...)
+
+	addtionalData := MultiAppend(seqNumBytes, tlsRecord.Type, tlsRecord.Version, tlsRecord.Len)
+
+	gcm, err := NewGCM(key)
+	if err != nil {
+		return nil, err
+	}
+
+	encryptedMessage, err := gcm.EncryptMessage(key, nonce, message, addtionalData)
+	if err != nil {
+		return nil, err
+	}
+	tlsRecord.Len = write2byte(uint16(len(nonce[4:]) + len(encryptedMessage)))
+
+	var buf bytes.Buffer
+	buf.Write(tlsRecord.ToByte())
+	buf.Write(nonce[4:]) //seqNumのこと
+	buf.Write(encryptedMessage)
+
+	return buf.Bytes(), nil
+}
+
+func (t *TLSConnect) SendApplicationData(message []byte) error {
+
+	bytes, err := t.createApplciationData(message)
+	if err != nil {
+		return err
+	}
+
+	_, err = t.Conn.Write(bytes)
+	if err != nil {
+		return err
+	}
+	t.AddSeqNum()
+
+	return nil
+
 }
 
 // handshake_messages All of the data from all messages in this handshake (not including any HelloRequest messages) up to, but not including, this message. This is only data visible at the handshake layer and does not include record layer headers. This is the concatenation of all the Handshake structures as defined in Section 7.4, exchanged thus far.
@@ -1027,7 +1058,7 @@ func (t *TLSConnect) parseEncryptedFinished(record *TLSRecord, content []byte) e
 	nonce := append(Copy(implicitNonce), explicitNonce...)
 
 	//addtionalで使うTLSLenはplainFinishedのLenなのでOverHeadを使って求める
-	gcm, err := GetGCM(key)
+	gcm, err := NewGCM(key)
 	if err != nil {
 		return err
 	}
@@ -1101,6 +1132,38 @@ func (t *TLSConnect) parseHandShake(bytes []byte) error {
 
 }
 
+func parseApplicationDataContent(content []byte) error {
+	fmt.Println(string(content))
+	return nil
+}
+
+func (t *TLSConnect) parseApplicationData(record *TLSRecord, content []byte) error {
+	key, implicitNonce := t.KeyBlock.ServerWriteKey, t.KeyBlock.ServerWriteIV
+	if t.IsServer {
+		key, implicitNonce = t.KeyBlock.ClientWriteKey, t.KeyBlock.ClientWriteIV
+	}
+
+	explicitNonce := content[:explicitNonceLen]
+	cipherText := content[explicitNonceLen:]
+	nonce := append(Copy(implicitNonce), explicitNonce...)
+
+	//addtionalで使うTLSLenはplainFinishedのLenなのでOverHeadを使って求める
+	gcm, err := NewGCM(key)
+	if err != nil {
+		return err
+	}
+
+	decryptTLSRecordLen := write2byte(uint16(len(cipherText) - gcm.c.Overhead()))
+	addtionalData := MultiAppend(Copy(explicitNonce), record.Type, record.Version, decryptTLSRecordLen)
+
+	decrypted, err := gcm.DecryptedMessage(key, nonce, cipherText, addtionalData)
+	if err != nil {
+		return err
+	}
+	return parseApplicationDataContent(decrypted)
+
+}
+
 func (t *TLSConnect) parseTLSRecord(buf []byte) *TLSRecord {
 	record := &TLSRecord{
 		Type:    []byte{buf[0]},
@@ -1140,11 +1203,11 @@ func (t *TLSConnect) parseRecvData(buf []byte) error {
 		return t.parseHandShake(buf[contentStart:contentEnd])
 	case CHANGE_CIPHER_SPEC:
 		return nil
+	case APPLICATION_DATA:
+		return t.parseApplicationData(record, buf[contentStart:contentEnd])
 	default:
 		return nil
-		// return record, buf[5:], nil
 		// case ALERT:
-		// case APPLICATION_DATA:
 	}
 
 }
@@ -1219,22 +1282,3 @@ func (t *TLSConnect) Read(r io.Reader) error {
 	return nil
 
 }
-
-//overBuffer
-
-// func (t *TLSConnect) Read(buf []byte) error {
-
-// 	var reader io.Reader = t.Conn
-
-// 	if t.OverBuffer.Len() != 0 {
-// 		reader = io.MultiReader(t.OverBuffer, t.Conn)
-// 	}
-
-// 	n, err := reader.Read(buf)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	return t.parseRecvData(buf[:n])
-
-// }

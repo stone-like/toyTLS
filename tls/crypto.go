@@ -123,7 +123,7 @@ func (g *GCM) EncryptMessage(writeKey, nonce, plainText, additionalData []byte) 
 	return cipherText, nil
 }
 
-func GetGCM(writeKey []byte) (*GCM, error) {
+func NewGCM(writeKey []byte) (*GCM, error) {
 	block, err := aes.NewCipher(writeKey)
 	if err != nil {
 		return nil, err
