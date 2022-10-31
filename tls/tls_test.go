@@ -1,79 +1,91 @@
 package tls
 
 import (
+	"bytes"
+	"crypto/rsa"
+	"crypto/x509"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
 )
 
-// type fakeAddr struct {
-// }
+//なんでTestReadに戻るとtlsConnの情報が消える？
+func TestRead(t *testing.T) {
 
-// func (f *fakeAddr) Network() string {
-// 	return "tcp"
-// }
+	certByte, err := GetContentFromFIle("../testData/server.crt")
+	require.NoError(t, err)
 
-// func (f *fakeAddr) String() string {
-// 	return "localhost"
-// }
+	cert, err := x509.ParseCertificate(certByte)
+	require.NoError(t, err)
 
-// type fakeConn struct {
-// 	Data []byte
-// }
+	option := NewTLSOption()
 
-// func (f *fakeConn) Read(b []byte) (n int, err error) {
-// 	return -1, nil
-// }
+	osFn := func() (*x509.CertPool, error) {
+		pool, err := option.OSPool()
+		if err != nil {
+			return nil, err
+		}
+		pool.AddCert(cert)
+		return pool, nil
+	}
 
-// func (f *fakeConn) Write(b []byte) (n int, err error) {
-// 	return -1, nil
-// }
+	tlsConn := &TLSConnect{
+		OverBuffer: &bytes.Buffer{},
+		Option:     NewTLSOption(OSPool(osFn)),
+	}
 
-// func (f *fakeConn) Close() error {
-// 	return nil
-// }
+	b1, err := tlsConn.CreateHello(SERVER_HELLO)
+	require.NoError(t, err)
+	b2, err := tlsConn.CreateCertificate([]string{"../testData/server.crt"})
+	require.NoError(t, err)
+	b3, err := tlsConn.CreateHelloDone()
+	require.NoError(t, err)
 
-// func (f *fakeConn) LocalAddr() net.Addr {
-// 	return &fakeAddr{}
-// }
+	bb := bytes.NewBuffer(MultiAppend(b1, b2, b3))
 
-// func (f *fakeConn) RemoteAddr() net.Addr {
-// 	return &fakeAddr{}
-// }
+	tlsConn.Read(bb)
 
-// func (f *fakeConn) SetDeadline(t time.Time) error {
-// 	return nil
-// }
+	require.Equal(t, len(tlsConn.Data), 2064)
 
-// func (f *fakeConn) SetReadDeadline(t time.Time) error {
-// 	return nil
-// }
+	recvData := tlsConn.Data[1032:]
+	require.True(t, bytes.Equal(recvData, tlsConn.Data[:1032]))
+	pubBytes, err := GetContentFromFIle("../testData/pub.key")
+	require.NoError(t, err)
 
-// func (f *fakeConn) SetWriteDeadline(t time.Time) error {
-// 	return nil
-// }
+	pubKeyInterface, err := x509.ParsePKIXPublicKey(pubBytes)
+	require.NoError(t, err)
 
-// func peerWrite(conn net.Conn, data []byte) {
-// 	conn.Write(data)
-// }
+	wantPubKey := pubKeyInterface.(*rsa.PublicKey)
 
-func TestTLS(t *testing.T) {
-	// conn := &fakeConn{}
-	// tlsConnect := NewTLSConnect(conn)
+	gotPubKey := tlsConn.PubKey
 
-	// tlsConnect.SendHello(CLIENT_HELLO)
+	if diff := cmp.Diff(gotPubKey, wantPubKey); diff != "" {
+		t.Errorf("diff is %s\n", diff)
+	}
+}
 
-	// bytes, err := tlsConnect.CreateHello(CLIENT_HELLO)
-	// peerWrite(tlsConnect.Conn, bytes)
+func TestDecryptPreMaster(t *testing.T) {
+	pubBytes, err := GetContentFromFIle("../testData/pub.key")
+	require.NoError(t, err)
 
-	// b := make([]byte, 1024)
-	// _, _, err := tlsConnect.Read(b)
-	// require.NoError(t, err)
-	// b = make([]byte, 1024)
-	// _, _, err = tlsConnect.Read(b)
-	// require.NoError(t, err)
-	// b = make([]byte, 1024)
-	// _, _, err = tlsConnect.Read(b)
-	// require.NoError(t, err)
+	pubKeyInterface, err := x509.ParsePKIXPublicKey(pubBytes)
+	require.NoError(t, err)
 
-	// tlsConnect.SendKeyExchange()
-	// tlsConnect.SendChangeCipherSpec()
+	pubKey := pubKeyInterface.(*rsa.PublicKey)
+
+	privBytes, err := GetContentFromFIle("../testData/private.key")
+	require.NoError(t, err)
+	privKey, err := x509.ParsePKCS1PrivateKey(privBytes)
+	require.NoError(t, err)
+
+	preMasterSecret := NewPreMasterSecret()
+	exchange, _, err := NewKeyExchange(pubKey, preMasterSecret)
+	require.NoError(t, err)
+
+	decryptedPreJMaster, err := decryptPreMaster(exchange.PreMasterSecret, privKey)
+	require.NoError(t, err)
+
+	require.True(t, bytes.Equal(preMasterSecret.ToByte(), decryptedPreJMaster))
+
 }

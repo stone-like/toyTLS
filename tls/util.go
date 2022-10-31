@@ -2,8 +2,10 @@ package tls
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"io"
 	"os"
 	"reflect"
 	"strings"
@@ -25,6 +27,16 @@ func write3byte(l uint32) []byte {
 	bytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(bytes, l)
 	return bytes[1:]
+}
+
+func write8byte(l uint64) []byte {
+	bytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(bytes, l)
+	return bytes
+}
+
+func Copy(bytes []byte) []byte {
+	return append([]byte{}, bytes...)
 }
 
 //構造体としての情報を入れてByte化するのではなく、中身だけをbyte化
@@ -70,4 +82,23 @@ func GetContent(name string) (string, error) {
 	}
 
 	return builder.String(), nil
+}
+
+func MultiAppend(bytelist ...[]byte) []byte {
+
+	var ret []byte
+	for _, bytes := range bytelist {
+		ret = append(ret, bytes...)
+	}
+
+	return ret
+}
+
+func GetBufferFromReader(r io.Reader) (*bytes.Buffer, error) {
+	buf := make([]byte, 4096)
+	n, err := r.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewBuffer(buf[:n]), nil
 }

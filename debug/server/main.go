@@ -29,27 +29,20 @@ func main() {
 
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
-	tlsConnect := tls.NewTLSConnect(conn, tls.NewTLSOption())
-	b := make([]byte, 1024)
-	err := tlsConnect.Read(b)
-	if err != nil {
-		log.Fatalf("clientHelloError %v\n", err)
+	tlsConnect := tls.NewTLSConnect(conn, tls.NewTLSOption(), true)
+	if err := tlsConnect.Read(tlsConnect.Conn); err != nil {
+		log.Fatalf("error:%v\n", err)
 	}
 
-	tlsConnect.SendHello(tls.SERVER_HELLO)
-	tlsConnect.SendCert([]string{"../../testData/server.crt"})
-	tlsConnect.SendHelloDone()
-
-	b = make([]byte, 1024)
-	err = tlsConnect.Read(b)
-	if err != nil {
-		log.Fatalf("clientKeyExchangeError %v\n", err)
+	if err := tlsConnect.SendServerFirst(); err != nil {
+		log.Fatalf("error:%v\n", err)
+	}
+	if err := tlsConnect.Read(tlsConnect.Conn); err != nil {
+		log.Fatalf("error:%v\n", err)
 	}
 
-	b = make([]byte, 1024)
-	err = tlsConnect.Read(b)
-	if err != nil {
-		log.Fatalf("cipherSpecError %v\n", err)
+	if err := tlsConnect.SendServerSecond(); err != nil {
+		log.Fatalf("error:%v\n", err)
 	}
 
 	fmt.Println(tlsConnect.ClientRandom)

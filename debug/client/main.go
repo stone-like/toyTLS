@@ -36,27 +36,22 @@ func main() {
 		pool.AddCert(cert)
 		return pool, nil
 	}
-	tlsConnect := tls.NewTLSConnect(conn, tls.NewTLSOption(tls.OSPool(osFn)))
+	tlsConnect := tls.NewTLSConnect(conn, tls.NewTLSOption(tls.OSPool(osFn)), false)
 
-	tlsConnect.SendHello(tls.CLIENT_HELLO)
-	b := make([]byte, 1024)
-	err = tlsConnect.Read(b)
-	if err != nil {
-		log.Fatalf("serverHelloError %v\n", err)
-	}
-	b = make([]byte, 1024)
-	err = tlsConnect.Read(b)
-	if err != nil {
-		log.Fatalf("CertError %v\n", err)
-	}
-	b = make([]byte, 1024)
-	err = tlsConnect.Read(b)
-	if err != nil {
-		log.Fatalf("ServerHelloDoneError %v\n", err)
+	if err := tlsConnect.SendClientFirst(); err != nil {
+		log.Fatalf("error:%v\n", err)
 	}
 
-	tlsConnect.SendKeyExchange()
-	tlsConnect.SendChangeCipherSpec()
+	if err := tlsConnect.Read(tlsConnect.Conn); err != nil {
+		log.Fatalf("error:%v\n", err)
+	}
+	if err := tlsConnect.SendClientSecond(); err != nil {
+		log.Fatalf("error:%v\n", err)
+	}
+
+	if err := tlsConnect.Read(tlsConnect.Conn); err != nil {
+		log.Fatalf("error:%v\n", err)
+	}
 
 	fmt.Println(tlsConnect.ClientRandom)
 	fmt.Println(tlsConnect.ServerRandom)

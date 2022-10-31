@@ -17,7 +17,8 @@ import (
 )
 
 var (
-	ErrUnknownHandShake = errors.New("this handshakeTyoe is unknown")
+	ErrUnknownHandShake = errors.New("this handshakeType is unknown")
+	ErrFinishedVerify   = errors.New("failed to verifyData")
 )
 
 //TLSRecordLayer
@@ -351,7 +352,6 @@ func (c *Certificate) GetPublicKey(getOSPool func() (*x509.CertPool, error)) (*r
 	}
 
 	pubKey := certs[0].PublicKey.(*rsa.PublicKey)
-	fmt.Println(pubKey)
 	return pubKey, nil
 }
 
@@ -574,29 +574,35 @@ func (p *PreMasterSecret) ToByte() []byte {
 	return ToByte(*p)
 }
 
+func decryptPreMaster(bytes []byte, priv *rsa.PrivateKey) ([]byte, error) {
+	return rsa.DecryptPKCS1v15(rand.Reader, priv, bytes)
+}
+
 type ClientKeyExchange struct {
 	Length          []byte //preMasterSecretのlen,2byte
 	PreMasterSecret []byte
 }
 
-func NewKeyExchange(pubKey *rsa.PublicKey) (*ClientKeyExchange, error) {
-
-	preMasterSecret := &PreMasterSecret{
+func NewPreMasterSecret() *PreMasterSecret {
+	return &PreMasterSecret{
 		Version: []byte{byte(CLIENT_MAJOR), byte(CLIENT_MINOR)},
 		Random:  generatePreMaster(),
 	}
+}
+
+func NewKeyExchange(pubKey *rsa.PublicKey, preMasterSecret *PreMasterSecret) (*ClientKeyExchange, []byte, error) {
 
 	//encrypt
 	preMasterBytes := preMasterSecret.ToByte()
 	secret, err := rsa.EncryptPKCS1v15(rand.Reader, pubKey, preMasterBytes)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	return &ClientKeyExchange{
 		Length:          write2byte(uint16(len(secret))),
 		PreMasterSecret: secret,
-	}, nil
+	}, preMasterBytes, nil
 }
 
 func (c *ClientKeyExchange) Len() int {
@@ -607,11 +613,22 @@ func (c *ClientKeyExchange) ToByte() []byte {
 	return append(c.Length, c.PreMasterSecret...)
 }
 
+//後続のchangeCipherSpecまで読み込んでしまうため、byteは制限する
+func (c *ClientKeyExchange) ToStruct(bytes []byte) error {
+	c.Length = bytes[:2]
+	c.PreMasterSecret = bytes[2:]
+	return nil
+}
+
 func (t *TLSConnect) CreateKeyExchange() ([]byte, error) {
-	exchange, err := NewKeyExchange(t.PubKey)
+
+	exchange, decryptedPreMaster, err := NewKeyExchange(t.PubKey, NewPreMasterSecret())
 	if err != nil {
 		return nil, err
 	}
+
+	t.MasterKey = CreateMasterKey(decryptedPreMaster, append(t.ClientRandom, t.ServerRandom...))
+	t.KeyBlock = NewKeyBlock(t.MasterKey, append(t.ServerRandom, t.ClientRandom...))
 
 	lenByte := write3byte(uint32(exchange.Len()))
 
@@ -669,8 +686,6 @@ func (t *TLSConnect) CreateChangeCipherSpec() ([]byte, error) {
 		Len:     lenByte,
 	}
 
-	t.AddData(cipherSpecContent)
-
 	var buf bytes.Buffer
 	buf.Write(tlsRecord.ToByte())
 	buf.Write(cipherSpecContent)
@@ -694,23 +709,28 @@ func (t *TLSConnect) SendChangeCipherSpec() error {
 }
 
 type Finished struct {
+	VerifyData []byte
 }
 
 func (f *Finished) Len() int {
-	return 0
+	return len(f.VerifyData)
 }
 
 func (f *Finished) ToByte() []byte {
-	return nil
+	return f.VerifyData
 }
 
-func NewFinished() *Finished {
-	return &Finished{}
+func NewFinished(master, messages []byte, label string) *Finished {
+	return &Finished{
+		VerifyData: CreateVerifyData(master, messages, label),
+	}
 }
 
-func CreateFinished() ([]byte, error) {
-	finished := NewFinished()
-
+//Finishedから暗号化が必要
+//AddtionalDataでのTLSHeaderではencryptしてないfinishedのlen16が入るけど
+//最終的なTLSHeaderのLenはContentであるencryptedFinishedの40がはいる
+func createFinished(t *TLSConnect, writeKey, nonce, messages []byte, label string) ([]byte, error) {
+	finished := NewFinished(t.MasterKey, messages, label)
 	lenByte := write3byte(uint32(finished.Len()))
 
 	header := &HandShakeHeader{
@@ -718,29 +738,101 @@ func CreateFinished() ([]byte, error) {
 		Length: lenByte,
 	}
 
-	recordLenByte := write2byte(uint16(header.Len() + finished.Len()))
+	message := append(header.ToByte(), finished.ToByte()...)
+
+	t.AddData(message)
+
 	tlsRecord := &TLSRecord{
 		Type:    []byte{byte(HANDSHAKE)},
 		Version: []byte{0x03, 0x01},
-		Len:     recordLenByte,
+		Len:     write2byte(uint16(len(message))),
 	}
+
+	seqNumBytes := Copy(nonce[4:])
+
+	addtionalData := MultiAppend(seqNumBytes, tlsRecord.Type, tlsRecord.Version, tlsRecord.Len)
+
+	gcm, err := GetGCM(writeKey)
+	if err != nil {
+		return nil, err
+	}
+
+	encryptedMessage, err := gcm.EncryptMessage(writeKey, nonce, message, addtionalData)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsRecord.Len = write2byte(uint16(len(nonce[4:]) + len(encryptedMessage)))
 
 	var buf bytes.Buffer
 	buf.Write(tlsRecord.ToByte())
-	buf.Write(header.ToByte())
-	buf.Write(finished.ToByte())
+	buf.Write(nonce[4:]) //seqNumのこと
+	buf.Write(encryptedMessage)
 
 	return buf.Bytes(), nil
 }
 
-func (t *TLSConnect) SendFinished(names []string) error {
+func (t *TLSConnect) CreateFinished(writeKey, nonce []byte, label string) ([]byte, error) {
+	return createFinished(t, writeKey, nonce, HashData(t.Data), label)
+}
 
-	bytes, err := CreateFinished()
+func (t *TLSConnect) CreateClientFinished() ([]byte, error) {
+	copied := Copy(t.KeyBlock.ClientWriteIV)
+	nonce := append(copied, t.SeqNumBytes()...)
+	return t.CreateFinished(t.KeyBlock.ClientWriteKey, nonce, clientVerifyLabel)
+}
+
+func (t *TLSConnect) CreateServerFinished() ([]byte, error) {
+	copied := Copy(t.KeyBlock.ServerWriteIV)
+	nonce := append(copied, t.SeqNumBytes()...)
+	return t.CreateFinished(t.KeyBlock.ServerWriteKey, nonce, serverVerifyLabel)
+}
+
+// func (t *TLSConnect) SendFinished(writeKey, nonce []byte, label string) error {
+
+// 	bytes, err := CreateFinished(t, writeKey, nonce, messages, label)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	_, err = t.Conn.Write(bytes)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	return nil
+// }
+
+// func (t *TLSConnect) SendClientFinished() error {
+// 	copied := Copy(t.KeyBlock.ClientWriteIV)
+// 	nonce := append(copied, t.SeqNumBytes()...)
+// 	return t.SendFinished(t.KeyBlock.ClientWriteKey, nonce, clientVerifyLabel)
+// }
+
+// func (t *TLSConnect) SendServerFinished() error {
+// 	copied := Copy(t.KeyBlock.ServerWriteIV)
+// 	nonce := append(copied, t.SeqNumBytes()...)
+// 	return t.SendFinished(t.KeyBlock.ServerWriteKey, nonce, serverVerifyLabel)
+// }
+
+func (t *TLSConnect) SendClientFirst() error {
+	return t.SendHello(CLIENT_HELLO)
+}
+
+func (t *TLSConnect) SendServerFirst() error {
+	b1, err := t.CreateHello(SERVER_HELLO)
 	if err != nil {
 		return err
 	}
-
-	_, err = t.Conn.Write(bytes)
+	b2, err := t.CreateCertificate([]string{"../../testData/server.crt"})
+	if err != nil {
+		return err
+	}
+	b3, err := t.CreateHelloDone()
+	if err != nil {
+		return err
+	}
+	_, err = t.Conn.Write(MultiAppend(b1, b2, b3))
 	if err != nil {
 		return err
 	}
@@ -748,7 +840,46 @@ func (t *TLSConnect) SendFinished(names []string) error {
 	return nil
 }
 
-var label = "toyTLSMaster"
+func (t *TLSConnect) SendClientSecond() error {
+	b1, err := t.CreateKeyExchange()
+	if err != nil {
+		return err
+	}
+	b2, err := t.CreateChangeCipherSpec()
+	if err != nil {
+		return err
+	}
+	b3, err := t.CreateClientFinished()
+	if err != nil {
+		return err
+	}
+
+	_, err = t.Conn.Write(MultiAppend(b1, b2, b3))
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (t *TLSConnect) SendServerSecond() error {
+
+	b1, err := t.CreateChangeCipherSpec()
+	if err != nil {
+		return err
+	}
+	b2, err := t.CreateServerFinished()
+	if err != nil {
+		return err
+	}
+
+	_, err = t.Conn.Write(MultiAppend(b1, b2))
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
 
 // handshake_messages All of the data from all messages in this handshake (not including any HelloRequest messages) up to, but not including, this message. This is only data visible at the handshake layer and does not include record layer headers. This is the concatenation of all the Handshake structures as defined in Section 7.4, exchanged thus far.
 
@@ -756,6 +887,7 @@ var label = "toyTLSMaster"
 
 type TLSOption struct {
 	OSPool func() (*x509.CertPool, error)
+	Nonce  func(size int) ([]byte, error)
 }
 
 func OSPool(fn func() (*x509.CertPool, error)) func(*TLSOption) {
@@ -764,9 +896,16 @@ func OSPool(fn func() (*x509.CertPool, error)) func(*TLSOption) {
 	}
 }
 
+func Nonce(fn func(size int) ([]byte, error)) func(*TLSOption) {
+	return func(t *TLSOption) {
+		t.Nonce = fn
+	}
+}
+
 func NewTLSOption(options ...func(*TLSOption)) *TLSOption {
 	t := &TLSOption{
 		OSPool: defaultOSPool,
+		Nonce:  defaultGenerateNonce,
 	}
 
 	for _, option := range options {
@@ -783,17 +922,145 @@ type TLSConnect struct {
 	ServerRandom []byte
 	PubKey       *rsa.PublicKey
 	Option       *TLSOption
+	KeyBlock     *KeyBlock
+	MasterKey    []byte
+	SeqNum       int
+	IsServer     bool
+	OverBuffer   *bytes.Buffer
 }
 
-func NewTLSConnect(conn net.Conn, option *TLSOption) *TLSConnect {
+func NewTLSConnect(conn net.Conn, option *TLSOption, isServer bool) *TLSConnect {
 	return &TLSConnect{
-		Conn:   conn,
-		Option: option,
+		Conn:       conn,
+		Option:     option,
+		IsServer:   isServer,
+		OverBuffer: bytes.NewBuffer([]byte{}),
 	}
+}
+
+func (t *TLSConnect) SeqNumBytes() []byte {
+	return write8byte(uint64(t.SeqNum))
+}
+
+func (t *TLSConnect) AddSeqNum() {
+	t.SeqNum++
 }
 
 func (t *TLSConnect) AddData(data []byte) {
 	t.Data = append(t.Data, data...)
+}
+
+func (t *TLSConnect) parseClientHello(content []byte) error {
+
+	h := &Hello{}
+	if err := h.ToStruct(content); err != nil {
+		return err
+	}
+	t.ClientRandom = h.Random
+	return nil
+}
+func (t *TLSConnect) parseServerHello(content []byte) error {
+	h := &Hello{}
+	if err := h.ToStruct(content); err != nil {
+		return err
+	}
+	t.ServerRandom = h.Random
+	return nil
+}
+
+func (t *TLSConnect) parseCert(content []byte) error {
+
+	c := &Certificate{}
+	if err := c.ToStruct(content); err != nil {
+		return err
+	}
+	pubKey, err := c.GetPublicKey(t.Option.OSPool)
+	if err != nil {
+		return err
+	}
+	t.PubKey = pubKey
+
+	return nil
+}
+
+func (t *TLSConnect) parseClientKeyExchange(content []byte) error {
+
+	c := &ClientKeyExchange{}
+	if err := c.ToStruct(content); err != nil {
+		return err
+	}
+
+	privBytes, err := GetContentFromFIle("../../testData/private.key")
+	if err != nil {
+		return err
+	}
+	privKey, err := x509.ParsePKCS1PrivateKey(privBytes)
+	if err != nil {
+		return err
+	}
+	decrypedPreMaster, err := decryptPreMaster(c.PreMasterSecret, privKey)
+	if err != nil {
+		return err
+	}
+	//masterとkeyBlockではrandomの順番が逆
+	masterKey := CreateMasterKey(decrypedPreMaster, append(t.ClientRandom, t.ServerRandom...))
+	t.MasterKey = masterKey
+	t.KeyBlock = NewKeyBlock(masterKey, append(t.ServerRandom, t.ClientRandom...))
+
+	return nil
+}
+
+func (t *TLSConnect) parseServerHelloDone(content []byte) error {
+
+	return nil
+}
+
+func (t *TLSConnect) parseEncryptedFinished(record *TLSRecord, content []byte) error {
+
+	key, implicitNonce := t.KeyBlock.ServerWriteKey, t.KeyBlock.ServerWriteIV
+	if t.IsServer {
+		key, implicitNonce = t.KeyBlock.ClientWriteKey, t.KeyBlock.ClientWriteIV
+	}
+
+	explicitNonce := content[:explicitNonceLen]
+	cipherText := content[explicitNonceLen:]
+	nonce := append(Copy(implicitNonce), explicitNonce...)
+
+	//addtionalで使うTLSLenはplainFinishedのLenなのでOverHeadを使って求める
+	gcm, err := GetGCM(key)
+	if err != nil {
+		return err
+	}
+
+	decryptTLSRecordLen := write2byte(uint16(len(cipherText) - gcm.c.Overhead()))
+	addtionalData := MultiAppend(Copy(explicitNonce), record.Type, record.Version, decryptTLSRecordLen)
+
+	decrypted, err := gcm.DecryptedMessage(key, nonce, cipherText, addtionalData)
+	if err != nil {
+		return err
+	}
+
+	return t.parseHandShake(decrypted)
+}
+
+func (t *TLSConnect) parseFinished(content []byte) error {
+
+	finished := Finished{
+		VerifyData: content,
+	}
+
+	label := serverVerifyLabel
+	if t.IsServer {
+		label = clientVerifyLabel
+	}
+
+	verfyData := CreateVerifyData(t.MasterKey, HashData(t.Data), label)
+
+	if !bytes.Equal(finished.VerifyData, verfyData) {
+		return ErrFinishedVerify
+	}
+
+	return nil
 }
 
 func (t *TLSConnect) parseHandShake(bytes []byte) error {
@@ -804,62 +1071,73 @@ func (t *TLSConnect) parseHandShake(bytes []byte) error {
 
 	content := bytes[4:]
 
-	//10種類あるが今回は下記のみの実装
-	switch HandShakeType(handShakeType) {
-	case CLIENT_HELLO:
-		h := &Hello{}
-		if err := h.ToStruct(content); err != nil {
-			return err
+	parse := func() error {
+		//10種類あるが今回は下記のみの実装
+		switch HandShakeType(handShakeType) {
+		case CLIENT_HELLO:
+			return t.parseClientHello(content)
+		case SERVER_HELLO:
+			return t.parseServerHello(content)
+		case CERTIFICATE:
+			return t.parseCert(content)
+		case CLIENT_KEY_EXCHANGE:
+			return t.parseClientKeyExchange(content)
+		case SERVER_HELLO_DONE:
+			return t.parseServerHelloDone(content)
+		case FINISHED:
+			return t.parseFinished(content)
+		default:
+			return ErrUnknownHandShake
 		}
-		t.ClientRandom = h.Random
-		return nil
-	case SERVER_HELLO:
-		h := &Hello{}
-		if err := h.ToStruct(content); err != nil {
-			return err
-		}
-		t.ServerRandom = h.Random
-		return nil
-	case CERTIFICATE:
-		c := &Certificate{}
-		if err := c.ToStruct(content); err != nil {
-			return err
-		}
-		pubKey, err := c.GetPublicKey(t.Option.OSPool)
-		if err != nil {
-			return err
-		}
-		t.PubKey = pubKey
-
-		return nil
-	case CLIENT_KEY_EXCHANGE:
-	case SERVER_HELLO_DONE:
-	case FINISHED:
-	default:
-		return ErrUnknownHandShake
-
 	}
 
+	if err := parse(); err != nil {
+		return err
+	}
+
+	//handshakeHeader+handshakeContentをadd
+	t.AddData(bytes)
 	return nil
+
 }
 
-func (t *TLSConnect) parseRecvData(buf []byte) error {
+func (t *TLSConnect) parseTLSRecord(buf []byte) *TLSRecord {
 	record := &TLSRecord{
 		Type:    []byte{buf[0]},
 		Version: buf[1:3],
 		Len:     buf[3:5],
 	}
+	return record
+
+}
+
+func (t *TLSConnect) parseRecvData(buf []byte) error {
+	// record := &TLSRecord{
+	// 	Type:    []byte{buf[0]},
+	// 	Version: buf[1:3],
+	// 	Len:     buf[3:5],
+	// }
+	record := t.parseTLSRecord(buf)
 
 	recType, err := util.Bytes2Int(record.Type)
 	if err != nil {
 		return err
 	}
 
-	t.AddData(buf)
+	contentLen, err := util.Bytes2Int(record.Len)
+	if err != nil {
+		return err
+	}
+	contentStart := 5
+	contentEnd := contentStart + contentLen
+
+	//overBuf
+	overBuf := Copy(buf[contentEnd:])
+	t.OverBuffer = bytes.NewBuffer(overBuf)
 
 	switch MessageType(recType) {
 	case HANDSHAKE:
-		return t.parseHandShake(buf[5:])
+		return t.parseHandShake(buf[contentStart:contentEnd])
 	case CHANGE_CIPHER_SPEC:
 		return nil
 	default:
@@ -871,12 +1149,92 @@ func (t *TLSConnect) parseRecvData(buf []byte) error {
 
 }
 
-func (t *TLSConnect) Read(buf []byte) error {
-	n, err := t.Conn.Read(buf)
+func (t *TLSConnect) ParseEncryptedFinished(buf []byte) error {
+	record := t.parseTLSRecord(buf)
+
+	contentLen, err := util.Bytes2Int(record.Len)
 	if err != nil {
 		return err
 	}
 
-	return t.parseRecvData(buf[:n])
+	contentStart := 5
+	contentEnd := contentStart + contentLen
+
+	//overBuf
+	overBuf := Copy(buf[contentEnd:])
+	t.OverBuffer = bytes.NewBuffer(overBuf)
+
+	return t.parseEncryptedFinished(record, buf[contentStart:contentEnd])
 
 }
+
+func isChangeCipherSpec(a, b []byte) bool {
+	return bytes.Equal(a, b)
+}
+
+func (t *TLSConnect) Read(r io.Reader) error {
+	// buf := bytes.NewBuffer(nil)
+	// io.Copy(buf, r)
+	// fmt.Println("copied")
+	// var reader io.Reader = io.TeeReader(buf, t.OverBuffer)
+
+	buf, err := GetBufferFromReader(r)
+	if err != nil {
+		return err
+	}
+
+	reader := io.MultiReader(t.OverBuffer, buf)
+	for {
+		tempBuf := make([]byte, 1500)
+
+		n, err := reader.Read(tempBuf)
+		if err != nil {
+			if err != io.EOF {
+				return err
+			}
+			break
+		}
+
+		data := tempBuf[:n]
+
+		if isChangeCipherSpec([]byte{data[0]}, []byte{byte(CHANGE_CIPHER_SPEC)}) {
+			if err := t.ParseEncryptedFinished(data[6:]); err != nil {
+				return err
+			}
+		} else {
+			if err := t.parseRecvData(data); err != nil {
+				return err
+			}
+		}
+
+		if t.OverBuffer.Len() == 0 {
+			break
+		}
+
+		// reader = io.MultiReader(t.OverBuffer, buf)
+		reader = io.MultiReader(t.OverBuffer, buf)
+
+	}
+
+	return nil
+
+}
+
+//overBuffer
+
+// func (t *TLSConnect) Read(buf []byte) error {
+
+// 	var reader io.Reader = t.Conn
+
+// 	if t.OverBuffer.Len() != 0 {
+// 		reader = io.MultiReader(t.OverBuffer, t.Conn)
+// 	}
+
+// 	n, err := reader.Read(buf)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	return t.parseRecvData(buf[:n])
+
+// }
