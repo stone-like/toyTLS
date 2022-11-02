@@ -168,7 +168,7 @@ func (p *DERParser) getByteLengthAndContentEndNum(baseLength int) (int, int) {
 	return p.Position + baseLength, p.Position + baseLength
 }
 
-//先頭1byte目から&0xc0で前半4bitを抜き出し、/64で6bit右シフトすると、元の1byte(8bit)から先頭2bitしか残らない
+//先頭1byte目から&0xc0で前半2bitを抜き出し、/64で6bit右シフトすると、元の1byte(8bit)から先頭2bitしか残らない
 //なので先頭1byteの最初の2bit,つまりクラスを抜き出せる
 func (p *DERParser) getClass() int {
 	return int((p.Data[p.Position] & 0xc0) / 64)
