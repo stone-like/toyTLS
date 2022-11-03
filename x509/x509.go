@@ -762,7 +762,7 @@ func (p *CertParser) parseToHex(asn1 *Data) string {
 }
 
 //Nameは6つchildがあり、それぞれのchildは
-//AttributeTypeAndValue
+//SetOF
 // AttributeTypeAndValue
 //  oid
 //  content
