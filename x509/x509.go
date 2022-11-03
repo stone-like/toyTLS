@@ -233,7 +233,7 @@ func (p *DERParser) MovePosition() {
 }
 
 type CertParser struct {
-	Position  int
+	// Position  int
 	ASN1      *Data
 	DERParser *DERParser
 }
@@ -1026,6 +1026,7 @@ func (p *CertParser) parseAlgorithmIdentifier(asn1 *Data) (*AlgorithmIdentifier,
 	algIdent.Algorithm = p.parseObjectIdent(encodeAlgo.Contents)
 
 	//parameters is optional
+	//TODO patameters部分も実装する
 	if len(pieces) == 2 {
 		algIdent.Parameters = &Parameters{}
 	}
