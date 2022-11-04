@@ -982,6 +982,7 @@ func (p *CertParser) parseSubjectPublicKeyInfo(asn1 *Data) (*SubjectPublicKeyInf
 	if err != nil {
 		return nil, err
 	}
+	//TODO algorithmに応じてBIT STRINGのパースを変更
 	pieces, err = p.parseDERList(keyValueData.Contents)
 	if err != nil {
 		return nil, err
