@@ -520,11 +520,16 @@ func (p *CertParser) parseOptional(data []*Data, tbs *TBSCertificate) error {
 	return nil
 }
 
-//Extensions
-// Extension(byte数)
-//  Extension(このExtensionのbyte数)
-//   Extension名
-//   Content
+//  Extensions  ::=  SEQUENCE SIZE (1..MAX) OF Extension
+
+// Extension  ::=  SEQUENCE  {
+// 	extnID      OBJECT IDENTIFIER,
+// 	critical    BOOLEAN DEFAULT FALSE,
+// 	extnValue   OCTET STRING
+// 				-- contains the DER encoding of an ASN.1 value
+// 				-- corresponding to the extension type identified
+// 				-- by extnID
+// 	}
 func (p *CertParser) parseExtensions(asn1 *Data) ([]Extension, error) {
 	p.DERParser.ResetWithNewData(asn1.Contents)
 	extensionsData, err := p.DERParser.Parse()
@@ -550,11 +555,6 @@ func (p *CertParser) parseExtensions(asn1 *Data) ([]Extension, error) {
 	return extensions, nil
 }
 
-//  Extension(このExtensionのbyte数)
-//   Extension名
-//   Critical(Option)
-//   Content
-//上記部分のParse
 func (p *CertParser) parseExtension(asn1 *Data) (Extension, error) {
 	pieces, err := p.parseDERList(asn1.Contents)
 	if err != nil {
