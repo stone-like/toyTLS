@@ -582,6 +582,7 @@ func (p *CertParser) parseExtension(asn1 *Data) (Extension, error) {
 
 //doesn't have critical
 // SubjectKeyIdentifier ::= KeyIdentifier
+//KeyIdentifire ::= OCTET STRING
 func (p *CertParser) parseSubjectKeyIdentifier(data []*Data, oid string) (*SubjectKeyIdentifier, error) {
 	if len(data) == 2 {
 		return nil, ErrExtensionCanNotBeCritical
@@ -604,6 +605,29 @@ func (p *CertParser) parseSubjectKeyIdentifier(data []*Data, oid string) (*Subje
 //     keyIdentifier             [0] KeyIdentifier           OPTIONAL,
 //     authorityCertIssuer       [1] GeneralNames            OPTIONAL,
 //     authorityCertSerialNumber [2] CertificateSerialNumber OPTIONAL }
+
+// CertificateSerialNumber  ::=  INTEGER
+
+// GeneralNames ::= SEQUENCE SIZE (1..MAX) OF GeneralName
+
+// GeneralName ::= CHOICE {
+//     otherName                 [0] OtherName,
+//     rfc822Name                [1] IA5String,
+//     dNSName                   [2] IA5String,
+//     x400Address               [3] ORAddress,
+//     directoryName             [4] Name,
+//     ediPartyName              [5] EDIPartyName,
+//     uniformResourceIdentifier [6] IA5String,
+//     iPAddress                 [7] OCTET STRING,
+//     registeredID              [8] OBJECT IDENTIFIER }
+
+// OtherName ::= SEQUENCE {
+//     type-id      OBJECT IDENTIFIER,
+//     value        [0] EXPLICIT ANY DEFINED BY type-id }
+
+// EDIPartyName ::= SEQUENCE {
+//     nameAssigner [0] DirectoryString OPTIONAL,
+//     partyName    [1] DirectoryString }
 
 //optionalの場合、クラスにはコンテキスト特定クラスが使用され、tagは普通の奴ではなく構造体の上からの番号になる
 //例えばkeyIdentifierだったらclass=2(コンテキスト特定クラス),tag=0となる
@@ -639,7 +663,7 @@ func (p *CertParser) parseAuthorityKeyIdentifier(data []*Data, oid string) (*Aut
 			hex := p.parseToHex(piece)
 			ident.KeyIdentifier = &hex
 		case 1:
-			name, err := p.parseName(piece)
+			name, err := p.parseGeneralNames(piece)
 			if err != nil {
 				return nil, err
 			}
@@ -653,6 +677,11 @@ func (p *CertParser) parseAuthorityKeyIdentifier(data []*Data, oid string) (*Aut
 	}
 
 	return ident, nil
+}
+
+//TODO GenerakNamesの実装
+func (p *CertParser) parseGeneralNames(asn1 *Data) (*Name, error) {
+	return nil, nil
 }
 
 //may have critical
