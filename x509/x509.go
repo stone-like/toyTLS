@@ -974,7 +974,7 @@ func (p *CertParser) parseSubjectPublicKeyInfo(asn1 *Data) (*SubjectPublicKeyInf
 		return nil, ErrInvalidSigAlgo
 	}
 
-	subjectPublicKey := p.parseBitString(pieces[1].Contents)
+	subjectPublicKey := p.parseBitString(pieces[1])
 
 	//subjectPublicKeyの中身のmodulesとexponentを取り出す
 	p.DERParser.ResetWithNewData(subjectPublicKey.Bytes)
@@ -1093,16 +1093,25 @@ func (p *CertParser) parseSignatureValue(asn1 *Data) (*SignatureValue, error) {
 
 	sig := &SignatureValue{}
 
-	bits := p.parseBitString(asn1.Contents)
+	bits := p.parseBitString(asn1)
 	sig.Value = bits.Bytes
 
 	return sig, nil
 }
 
-func (p *CertParser) parseBitString(data []byte) *BitString {
+func (p *CertParser) parseBitString(asn1 *Data) *BitString {
+
+	data := asn1.Contents
+
+	if asn1.Structured {
+		return &BitString{
+			Bytes: data,
+		}
+	}
+
 	return &BitString{
 		UnUsedBits: int(data[0]),
-		Bytes:      data[1:],
+		Bytes:      data[1 : len(data)-int(data[0])],
 	}
 }
 
