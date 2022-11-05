@@ -44,19 +44,19 @@ func (c *Certificate) Verify() bool {
 		return false
 	}
 
-	hashed := c.TbsCertificate.ASN1.Raw
+	data := c.TbsCertificate.ASN1.Raw
 
 	switch hashType {
 	//go本家だと、MD5やSHA1はエラーにしていた
 	default:
 		h := hashType.New()
-		h.Write(hashed)
-		hashed = h.Sum(nil)
+		h.Write(data)
+		data = h.Sum(nil)
 	}
 
 	switch pub := pubKey.(type) {
 	case *rsa.PublicKey:
-		if err := verifyWithRSA(hashed, sigValue, pub, hashType); err != nil {
+		if err := verifyWithRSA(data, sigValue, pub, hashType); err != nil {
 			return false
 		}
 		return true
