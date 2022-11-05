@@ -31,38 +31,44 @@ func GetHashType(sigType string) (crypto.Hash, error) {
 	return 0, ErrUnSupportedAlgorithm
 }
 
-func (c *Certificate) Verify() bool {
+func (c *Certificate) Verify(pubKeyPool []crypto.PublicKey) bool {
 
-	pubKey, err := c.TbsCertificate.SubjectPublicKeyInfo.SubjectPublicKey.toPubKey()
-	if err != nil {
-		return false
-	}
-
-	sigValue := c.SignatureValue.Value
-	hashType, err := GetHashType(c.SignatureAlgorithm.Algorithm)
-	if err != nil {
-		return false
-	}
-
-	data := c.TbsCertificate.ASN1.Raw
-
-	switch hashType {
-	//go本家だと、MD5やSHA1はエラーにしていた
-	default:
-		h := hashType.New()
-		h.Write(data)
-		data = h.Sum(nil)
-	}
-
-	switch pub := pubKey.(type) {
-	case *rsa.PublicKey:
-		if err := verifyWithRSA(data, sigValue, pub, hashType); err != nil {
+	verify := func(pubKey crypto.PublicKey) bool {
+		sigValue := c.SignatureValue.Value
+		hashType, err := GetHashType(c.SignatureAlgorithm.Algorithm)
+		if err != nil {
 			return false
 		}
-		return true
-	default:
-		return false
+
+		data := c.TbsCertificate.ASN1.Raw
+
+		switch hashType {
+		//go本家だと、MD5やSHA1はエラーにしていた
+		default:
+			h := hashType.New()
+			h.Write(data)
+			data = h.Sum(nil)
+		}
+
+		switch pub := pubKey.(type) {
+		case *rsa.PublicKey:
+			if err := verifyWithRSA(data, sigValue, pub, hashType); err != nil {
+				return false
+			}
+			return true
+		default:
+			return false
+		}
 	}
+
+	for _, pubKey := range pubKeyPool {
+		if verify(pubKey) {
+			return true
+		}
+	}
+
+	return false
+
 }
 
 func verifyWithRSA(hashed []byte, sig []byte, key *rsa.PublicKey, hashType crypto.Hash) error {
